@@ -1,0 +1,13 @@
+"mod"
+{
+    "name" "RFD Level Editor Support"
+    "id" "rfdeditor"
+    "author" "RFD Editor Contributors"
+    "version" "0.1.0"
+    "description" "Local authoring adapter for R5R-v2.6.52; disabled in normal play"
+    "ConVars"
+    {
+        "rfd_editor_enabled" { "flags" "RELEASE" "Values" { "default" "0" "min" "0" "max" "1" } }
+        "rfd_editor_selftest" { "flags" "RELEASE" "helpText" "Read-only saved-scene replay verification; never saves" "Values" { "default" "0" "min" "0" "max" "1" } }
+    }
+}

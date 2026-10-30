@@ -1,0 +1,34 @@
+// Delete only props registered by this editor, never native map geometry.
+global function RFD_EditorDeleteInit
+#if SERVER
+global function RFD_EditorDeleteAtAim
+#endif
+
+void function RFD_EditorDeleteInit()
+{
+}
+
+#if SERVER
+void function RFD_EditorDeleteAtAim( entity player )
+{
+    if ( !RFD_EditorPlayerHasTool( player ) ) return
+    vector start = player.EyePosition()
+    TraceResults trace = TraceLine( start, start + player.GetViewForward() * 4096.0, [player], TRACE_MASK_SHOT, TRACE_COLLISION_GROUP_NONE )
+    entity target = trace.hitEnt
+    if ( !IsValid( target ) || target.GetScriptName() != "rfd_editor_placed_prop" )
+    {
+        printt( "[RFD_EDITOR] DELETE_MISS" )
+        return
+    }
+    bool registered = false
+    foreach ( entity prop in RFD_EditorGetProps() )
+        if ( prop == target ) registered = true
+    if ( !registered ) return
+    printt( "[RFD_EDITOR] PROP_DELETED", "entity", target.GetEncodedEHandle(), "model", string( target.GetModelName() ), "origin", target.GetOrigin(), "angles", target.GetAngles() )
+    vector origin = target.GetOrigin()
+    vector angles = target.GetAngles()
+    printl( "[delete]" + string( target.GetModelName() ) + ";" + origin.x + "," + origin.y + "," + origin.z + ";" + angles.x + "," + angles.y + "," + angles.z )
+    RFD_EditorForgetProp( target )
+    target.Destroy()
+}
+#endif

@@ -1,0 +1,376 @@
+// Server-authoritative placement, adapted from SalEditor's placement mode.
+// Preview is a separate non-solid entity, never part of the saved registry.
+global function RFD_EditorPlaceInit
+global function RFD_EditorModelAllowed
+global const int RFD_EDITOR_MAX_PROPS = 200
+#if SERVER
+global function RFD_EditorPlayerHasTool
+global function RFD_EditorGetMode
+global function RFD_EditorSetMode
+global function RFD_EditorCommandMode
+global function RFD_EditorStopPreview
+global function RFD_EditorCommitPreview
+global function RFD_EditorGetProps
+global function RFD_EditorPlaceProp
+global function RFD_EditorClearProps
+global function RFD_EditorForgetProp
+
+struct RFDEditorPlaceState
+{
+    entity preview
+    int mode = 0
+    string section = "RFD_MARKERS"
+    int index = 0
+    float grid = 4.0
+    vector rotations = <0,0,0>
+    float height = 0.0
+    int generation = 0
+}
+#endif
+
+struct
+{
+    bool initialized = false
+    table<string, array<asset> > catalog
+    #if SERVER
+    table<entity, RFDEditorPlaceState> states
+    array<entity> props
+    #endif
+} file
+
+void function RFD_EditorPlaceInit()
+{
+    if ( file.initialized )
+        return
+    file.initialized = true
+    file.catalog["RFD_MARKERS"] <- [
+        $"mdl/props/death_box/death_box_01.rmdl",
+        $"mdl/Humans/class/medium/combat_dummie_medium.rmdl"
+    ]
+    #if SERVER
+    foreach ( string section, array<asset> models in file.catalog )
+        foreach ( asset model in models ) PrecacheModel( model )
+    RegisterSignal( "RFD_EditorPreviewStop" )
+    AddClientCommandCallback( "rfd_editor_next", RFD_EditorCommandNext )
+    AddClientCommandCallback( "rfd_editor_previous", RFD_EditorCommandPrevious )
+    AddClientCommandCallback( "rfd_editor_section", RFD_EditorCommandSection )
+    AddClientCommandCallback( "rfd_editor_rotate", RFD_EditorCommandRotate )
+    AddClientCommandCallback( "rfd_editor_snap", RFD_EditorCommandSnap )
+    AddClientCommandCallback( "rfd_editor_height", RFD_EditorCommandHeight )
+    AddClientCommandCallback( "rfd_editor_reset", RFD_EditorCommandReset )
+    AddCallback_OnClientDisconnected( RFD_EditorOnDisconnected )
+    #endif
+}
+
+bool function RFD_EditorModelAllowed( asset model )
+{
+    foreach ( string section, array<asset> models in file.catalog )
+        foreach ( asset allowed in models )
+            if ( allowed == model ) return true
+    return false
+}
+
+#if SERVER
+table<string, array<asset> > function RFD_EditorCatalog()
+{
+    return file.catalog
+}
+
+bool function RFD_EditorPlayerHasTool( entity player )
+{
+    if ( !IsValid( player ) || !IsAlive( player ) || !player.IsPlayer() )
+        return false
+    entity weapon = player.GetActiveWeapon( eActiveInventorySlot.mainHand )
+    return IsValid( weapon ) && weapon.GetWeaponClassName() == "mp_weapon_editor"
+}
+
+RFDEditorPlaceState function RFD_EditorState( entity player )
+{
+    if ( !(player in file.states) )
+    {
+        RFDEditorPlaceState state
+        file.states[player] <- state
+    }
+    return file.states[player]
+}
+
+array<string> function RFD_EditorSections()
+{
+    array<string> sections
+    foreach ( string section, array<asset> models in RFD_EditorCatalog() )
+        if ( models.len() > 0 )
+            sections.append( section )
+    sections.sort()
+    return sections
+}
+
+bool function RFD_EditorValidateSelection( RFDEditorPlaceState state )
+{
+    table<string, array<asset> > catalog = RFD_EditorCatalog()
+    if ( !(state.section in catalog) || catalog[state.section].len() == 0 )
+    {
+        array<string> sections = RFD_EditorSections()
+        if ( sections.len() == 0 )
+            return false
+        state.section = sections[0]
+        state.index = 0
+    }
+    if ( state.index < 0 || state.index >= catalog[state.section].len() )
+        state.index = 0
+    return true
+}
+
+asset function RFD_EditorSelectedModel( RFDEditorPlaceState state )
+{
+    return RFD_EditorCatalog()[state.section][state.index]
+}
+
+int function RFD_EditorGetMode( entity player )
+{
+    return RFD_EditorState( player ).mode
+}
+
+void function RFD_EditorSetMode( entity player, int mode )
+{
+    if ( !IsValid( player ) || !IsAlive( player ) )
+        return
+    RFD_EditorStopPreview( player )
+    RFDEditorPlaceState state = RFD_EditorState( player )
+    state.mode = mode == 1 ? 1 : 0
+    Remote_CallFunction_NonReplay( player, "RFD_EditorClientMode", state.mode )
+    printt( "[RFD_EDITOR] MODE", "owner", player.GetEncodedEHandle(), "mode", state.mode )
+    if ( state.mode == 0 )
+        RFD_EditorStartPreview( player, state )
+}
+
+bool function RFD_EditorCommandMode( entity player, array<string> args )
+{
+    if ( !RFD_EditorPlayerHasTool( player ) )
+        return true
+    int next = RFD_EditorGetMode( player ) == 0 ? 1 : 0
+    if ( args.len() > 0 )
+    {
+        if ( args[0] == "0" ) next = 0
+        else if ( args[0] == "1" ) next = 1
+        else return true
+    }
+    RFD_EditorSetMode( player, next )
+    return true
+}
+
+void function RFD_EditorStartPreview( entity player, RFDEditorPlaceState state )
+{
+    if ( !RFD_EditorValidateSelection( state ) )
+    {
+        printt( "[RFD_EDITOR] PREVIEW_REJECT empty_native_model_catalog", "map", GetMapName() )
+        return
+    }
+    state.preview = CreatePropDynamic( RFD_EditorSelectedModel( state ), player.GetOrigin(), <0,0,0>, 0, -1 )
+    state.preview.SetScriptName( "rfd_editor_preview" )
+    state.preview.NotSolid()
+    state.preview.SetTakeDamageType( DAMAGE_NO )
+    state.preview.SetOwner( player )
+    state.preview.kv.rendermode = 3
+    state.preview.kv.renderamt = 160
+    state.preview.kv.rendercolor = "80 255 120"
+    state.preview.DisableHibernation()
+    state.generation++
+    thread RFD_EditorPreviewThink( player, state, state.generation )
+    RFD_EditorLogSelection( state )
+}
+
+void function RFD_EditorPreviewThink( entity player, RFDEditorPlaceState state, int generation )
+{
+    player.EndSignal( "OnDestroy" )
+    player.EndSignal( "OnDeath" )
+    player.EndSignal( "OnDisconnected" )
+    player.EndSignal( "RFD_EditorPreviewStop" )
+    entity preview = state.preview
+    OnThreadEnd( function() : ( preview )
+    {
+        if ( IsValid( preview ) ) preview.Destroy()
+    } )
+    while ( IsValid( player ) && IsAlive( player ) && IsValid( preview ) && state.generation == generation && state.mode == 0 )
+    {
+        vector start = player.EyePosition()
+        TraceResults hit = TraceLine( start, start + player.GetViewForward() * 4096.0, [player,preview], TRACE_MASK_SHOT, TRACE_COLLISION_GROUP_NONE )
+        vector position = hit.endPos
+        float grid = state.grid
+        position.x = RoundToNearestInt( position.x / grid ) * grid
+        position.y = RoundToNearestInt( position.y / grid ) * grid
+        position.z = RoundToNearestInt( position.z / grid ) * grid + state.height
+        vector rotation = state.rotations
+        rotation.y += RoundToNearestInt( player.EyeAngles().y / 15.0 ) * 15.0
+        preview.SetOrigin( position )
+        preview.SetAngles( rotation )
+        WaitFrame()
+    }
+}
+
+void function RFD_EditorStopPreview( entity player )
+{
+    if ( !(player in file.states) )
+        return
+    RFDEditorPlaceState state = file.states[player]
+    state.generation++
+    if ( IsValid( player ) ) player.Signal( "RFD_EditorPreviewStop" )
+    if ( IsValid( state.preview ) ) state.preview.Destroy()
+    state.preview = null
+}
+
+void function RFD_EditorCommitPreview( entity player )
+{
+    RFDEditorPlaceState state = RFD_EditorState( player )
+    if ( state.mode != 0 || !IsValid( state.preview ) || !RFD_EditorValidateSelection( state ) )
+        return
+    RFD_EditorPlaceProp( RFD_EditorSelectedModel( state ), state.preview.GetOrigin(), state.preview.GetAngles() )
+}
+
+entity function RFD_EditorPlaceProp( asset model, vector origin, vector angles )
+{
+    // Bound both interactive creation and snapshot imports to the same limit.
+    // Prune any deleted entities before testing the count.
+    if ( RFD_EditorGetProps().len() >= RFD_EDITOR_MAX_PROPS )
+    {
+        printt( "[RFD_EDITOR] PLACE_REJECT prop_limit", "cap", RFD_EDITOR_MAX_PROPS )
+        return null
+    }
+    if ( !RFD_EditorModelAllowed( model ) )
+    {
+        printt( "[RFD_EDITOR] PLACE_REJECT unlisted_model", "model", string( model ) )
+        return null
+    }
+    if ( !PositionIsInMapBounds( origin ) )
+    {
+        printt( "[RFD_EDITOR] PLACE_REJECT outside_world", "origin", origin )
+        return null
+    }
+    entity prop = CreatePropDynamic( model, origin, angles, SOLID_VPHYSICS, -1 )
+    prop.SetScriptName( "rfd_editor_placed_prop" )
+    prop.SetTakeDamageType( DAMAGE_NO )
+    prop.AllowMantle()
+    prop.DisableHibernation()
+    file.props.append( prop )
+    printt( "[RFD_EDITOR] PROP_PLACED", "entity", prop.GetEncodedEHandle(), "model", string( model ), "origin", origin, "angles", angles, "count", file.props.len() )
+    printl( "[editor]" + string( model ) + ";" + origin.x + "," + origin.y + "," + origin.z + ";" + angles.x + "," + angles.y + "," + angles.z )
+    return prop
+}
+
+array<entity> function RFD_EditorGetProps()
+{
+    array<entity> props
+    foreach ( entity prop in file.props )
+        if ( IsValid( prop ) ) props.append( prop )
+    file.props = props
+    return props
+}
+
+void function RFD_EditorForgetProp( entity prop )
+{
+    for ( int i = file.props.len() - 1; i >= 0; i-- )
+        if ( file.props[i] == prop || !IsValid( file.props[i] ) ) file.props.remove( i )
+}
+
+void function RFD_EditorClearProps()
+{
+    int count = 0
+    foreach ( entity prop in file.props )
+        if ( IsValid( prop ) ) { prop.Destroy(); count++ }
+    file.props.clear()
+    printt( "[RFD_EDITOR] PROPS_CLEARED", "count", count )
+}
+
+void function RFD_EditorLogSelection( RFDEditorPlaceState state )
+{
+    printt( "[RFD_EDITOR] SELECTION", "section", state.section, "index", state.index, "model", string( RFD_EditorSelectedModel( state ) ), "grid", state.grid, "rotation", state.rotations, "height", state.height )
+}
+
+void function RFD_EditorRefreshPreviewModel( RFDEditorPlaceState state )
+{
+    if ( RFD_EditorValidateSelection( state ) )
+    {
+        if ( IsValid( state.preview ) ) state.preview.SetModel( RFD_EditorSelectedModel( state ) )
+        RFD_EditorLogSelection( state )
+    }
+}
+
+bool function RFD_EditorCommandNext( entity player, array<string> args )
+{
+    if ( !RFD_EditorPlayerHasTool( player ) ) return true
+    RFDEditorPlaceState state = RFD_EditorState( player )
+    if ( !RFD_EditorValidateSelection( state ) ) return true
+    state.index = (state.index + 1) % RFD_EditorCatalog()[state.section].len()
+    RFD_EditorRefreshPreviewModel( state )
+    return true
+}
+bool function RFD_EditorCommandPrevious( entity player, array<string> args )
+{
+    if ( !RFD_EditorPlayerHasTool( player ) ) return true
+    RFDEditorPlaceState state = RFD_EditorState( player )
+    if ( !RFD_EditorValidateSelection( state ) ) return true
+    int count = RFD_EditorCatalog()[state.section].len()
+    state.index = (state.index + count - 1) % count
+    RFD_EditorRefreshPreviewModel( state )
+    return true
+}
+bool function RFD_EditorCommandSection( entity player, array<string> args )
+{
+    if ( !RFD_EditorPlayerHasTool( player ) ) return true
+    RFDEditorPlaceState state = RFD_EditorState( player )
+    array<string> sections = RFD_EditorSections()
+    if ( sections.len() == 0 ) return true
+    int index = -1
+    for ( int i = 0; i < sections.len(); i++ ) if ( sections[i] == state.section ) index = i
+    state.section = sections[(index + 1) % sections.len()]
+    if ( args.len() > 0 && args[0] in RFD_EditorCatalog() ) state.section = args[0]
+    state.index = 0
+    RFD_EditorRefreshPreviewModel( state )
+    return true
+}
+bool function RFD_EditorCommandRotate( entity player, array<string> args )
+{
+    if ( !RFD_EditorPlayerHasTool( player ) || args.len() == 0 ) return true
+    RFDEditorPlaceState state = RFD_EditorState( player )
+    vector rotation = state.rotations
+    if ( args[0] == "pitch" ) rotation.x = (rotation.x + 15.0) % 360.0
+    else if ( args[0] == "yaw" ) rotation.y = (rotation.y + 15.0) % 360.0
+    else if ( args[0] == "roll" ) rotation.z = (rotation.z + 15.0) % 360.0
+    state.rotations = rotation
+    RFD_EditorLogSelection( state )
+    return true
+}
+bool function RFD_EditorCommandSnap( entity player, array<string> args )
+{
+    if ( !RFD_EditorPlayerHasTool( player ) ) return true
+    RFDEditorPlaceState state = RFD_EditorState( player )
+    if ( state.grid == 4.0 ) state.grid = 16.0
+    else if ( state.grid == 16.0 ) state.grid = 64.0
+    else if ( state.grid == 64.0 ) state.grid = 128.0
+    else state.grid = 4.0
+    RFD_EditorLogSelection( state )
+    return true
+}
+bool function RFD_EditorCommandHeight( entity player, array<string> args )
+{
+    if ( !RFD_EditorPlayerHasTool( player ) || args.len() == 0 ) return true
+    RFDEditorPlaceState state = RFD_EditorState( player )
+    if ( args[0] == "1" ) state.height = min( state.height + 32.0, 2048.0 )
+    else if ( args[0] == "-1" ) state.height = max( state.height - 32.0, -2048.0 )
+    RFD_EditorLogSelection( state )
+    return true
+}
+bool function RFD_EditorCommandReset( entity player, array<string> args )
+{
+    if ( !RFD_EditorPlayerHasTool( player ) ) return true
+    RFDEditorPlaceState state = RFD_EditorState( player )
+    state.rotations = <0,0,0>
+    state.height = 0.0
+    RFD_EditorLogSelection( state )
+    return true
+}
+void function RFD_EditorOnDisconnected( entity player )
+{
+    RFD_EditorStopPreview( player )
+    if ( player in file.states ) delete file.states[player]
+}
+#endif

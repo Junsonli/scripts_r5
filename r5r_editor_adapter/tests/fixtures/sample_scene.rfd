@@ -1,0 +1,11 @@
+RFD_EDITOR_V1
+MAP|mp_rr_arena_phase_runner
+PROP|mdl/props/death_box/death_box_01.rmdl|100.000000|200.000000|300.000000|0.000000|90.000000|0.000000|A_center
+PROP|mdl/props/death_box/death_box_01.rmdl|-100.000000|0.000000|12.500000|0.000000|0.000000|0.000000|B_center
+PROP|mdl/props/death_box/death_box_01.rmdl|0.000000|0.000000|0.000000|0.000000|180.000000|0.000000|C_center
+PROP|mdl/props/death_box/death_box_01.rmdl|999.000000|888.000000|777.000000|0.000000|-90.000000|0.000000|D_center
+PROP|mdl/props/death_box/death_box_01.rmdl|10.000000|20.000000|30.000000|0.000000|0.000000|0.000000|A_vertex_5
+PROP|mdl/props/death_box/death_box_01.rmdl|40.000000|50.000000|60.000000|0.000000|0.000000|0.000000|A_vertex_6
+PROP|mdl/props/death_box/death_box_01.rmdl|70.000000|80.000000|90.000000|0.000000|0.000000|0.000000|A_vertex_7
+PROP|mdl/Humans/class/medium/combat_dummie_medium.rmdl|1.000000|2.000000|3.000000|0.000000|15.000000|0.000000|-
+END|8

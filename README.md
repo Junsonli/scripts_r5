@@ -1,5 +1,7 @@
 # Apex Legends Map Editor
 
+For R5R-v2.6.52, see the [independent editor adapter and installation guide](r5r_editor_adapter/README.md). The original editor documentation is preserved below.
+
 ![](https://i.imgur.com/Ib3E6qz.png)
 
 

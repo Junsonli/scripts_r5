@@ -1,0 +1,334 @@
+#if SERVER
+global function CodeCallback_rfdeditor_ModInit
+struct RFDEditorRecord
+{
+    asset model
+    vector origin
+    vector angles
+    string tag = "-"
+}
+struct
+{
+    table<entity,string> tags
+    int serial = 0
+    array<RFDEditorRecord> pending
+    int expected = -1
+    bool invalidImport = false
+    int successfulImports = 0
+    bool selfTestStarted = false
+} file
+
+void function CodeCallback_rfdeditor_ModInit()
+{
+    if ( GetConVarInt( "rfd_editor_enabled" ) != 1 ) return
+    MpWeaponEditor_Init()
+    ScriptRemote_RegisterClientFunction( "RFD_EditorClientReplay" )
+    AddCallback_OnPlayerRespawnedFinal( RFD_EditorOnSpawn )
+    AddClientCommandCallback( "rfd_ed_save", RFD_EditorSave )
+    AddClientCommandCallback( "rfd_ed_load", RFD_EditorLoad )
+    AddClientCommandCallback( "rfd_ed_clear", RFD_EditorClear )
+    AddClientCommandCallback( "rfd_mark", RFD_EditorMark )
+    AddClientCommandCallback( "rfd_ed_check", RFD_EditorCheck )
+    AddClientCommandCallback( "rfd_ed_import_begin", RFD_EditorImportBegin )
+    AddClientCommandCallback( "rfd_ed_import_prop", RFD_EditorImportProp )
+    AddClientCommandCallback( "rfd_ed_import_end", RFD_EditorImportEnd )
+    thread RFD_EditorDrawLabels()
+    printt( "[RFD_EDITOR] SERVER_INIT", "map", GetMapName() )
+}
+
+void function RFD_EditorOnSpawn( entity player )
+{
+    if ( !IsValid( player ) || player.IsBot() ) return
+    thread RFD_EditorGiveTool( player )
+}
+
+void function RFD_EditorGiveTool( entity player )
+{
+    player.EndSignal( "OnDestroy" )
+    wait 1.0
+    if ( !IsAlive( player ) ) return
+    player.TakeOffhandWeapon( OFFHAND_TACTICAL )
+    player.GiveOffhandWeapon( "mp_weapon_editor", OFFHAND_TACTICAL, [] )
+    printt( "[RFD_EDITOR] TOOL_GIVEN", "owner", player.GetEncodedEHandle() )
+    if ( GetConVarInt( "rfd_editor_selftest" ) == 1 && !file.selfTestStarted )
+    {
+        file.selfTestStarted = true
+        thread RFD_EditorVerifyReplay( player )
+    }
+}
+
+array<string> function RFD_EditorTestSequence()
+{
+    array<string> sequence
+    foreach ( entity prop in RFD_EditorGetProps() )
+    {
+        string tag = prop in file.tags ? file.tags[prop] : "-"
+        sequence.append( string( prop.GetModelName() ) + "|" + RFD_EditorVectorLine( prop.GetOrigin() ) + "|" + RFD_EditorVectorLine( prop.GetAngles() ) + "|" + tag )
+    }
+    return sequence
+}
+
+void function RFD_EditorVerifyReplay( entity player )
+{
+    player.EndSignal( "OnDestroy" )
+    player.EndSignal( "OnDisconnected" )
+    printt( "[RFD_EDITOR_TEST] BEGIN native_client_exec_replay_no_disk_writes" )
+    wait 1.0
+    int importsBefore = file.successfulImports
+    Remote_CallFunction_NonReplay( player, "RFD_EditorClientReplay" )
+    wait 1.0
+    array<string> first = RFD_EditorTestSequence()
+    if ( file.successfulImports <= importsBefore || first.len() == 0 )
+    {
+        printt( "[RFD_EDITOR_TEST] FAIL first_native_replay", "props", first.len(), "imports", file.successfulImports - importsBefore )
+        return
+    }
+    foreach ( int index, string record in first )
+        printt( "[RFD_EDITOR_TEST] FIRST_RECORD", index, record )
+    printt( "[RFD_EDITOR_TEST] PASS first_native_replay", "props", first.len() )
+
+    // In-memory registry only. Never call Save/Mark or write the source files.
+    RFD_EditorClearProps()
+    file.tags.clear()
+    if ( RFD_EditorGetProps().len() != 0 || file.tags.len() != 0 )
+    {
+        printt( "[RFD_EDITOR_TEST] FAIL clear_in_memory_scene" )
+        return
+    }
+    importsBefore = file.successfulImports
+    Remote_CallFunction_NonReplay( player, "RFD_EditorClientReplay" )
+    wait 1.0
+    array<string> second = RFD_EditorTestSequence()
+    bool matches = file.successfulImports > importsBefore && second.len() == first.len()
+    foreach ( int index, string record in second )
+    {
+        printt( "[RFD_EDITOR_TEST] REPLAY_RECORD", index, record )
+        if ( index >= first.len() || record != first[index] ) matches = false
+    }
+    printt( "[RFD_EDITOR_TEST]", matches ? "PASS" : "FAIL", "clear_then_native_replay_same_sequence", "first", first.len(), "second", second.len(), "imports", file.successfulImports - importsBefore )
+}
+
+string function RFD_EditorSavePath()
+{
+    return "rfd_editor_saves/" + GetMapName() + ".rfd"
+}
+
+string function RFD_EditorVectorLine( vector v )
+{
+    return format( "%.6f|%.6f|%.6f", v.x, v.y, v.z )
+}
+
+bool function RFD_EditorSave( entity player, array<string> args )
+{
+    array<entity> props = RFD_EditorGetProps()
+    string snapshot = "RFD_EDITOR_V1\nMAP|" + GetMapName() + "\n"
+    string replay = "// RFD Editor generated scene; data commands only\nrfd_ed_import_begin " + GetMapName() + " " + props.len() + "\n"
+    foreach ( entity prop in props )
+    {
+        string tag = prop in file.tags ? file.tags[prop] : "-"
+        snapshot += "PROP|" + string( prop.GetModelName() ) + "|" + RFD_EditorVectorLine( prop.GetOrigin() ) + "|" + RFD_EditorVectorLine( prop.GetAngles() ) + "|" + tag + "\n"
+        vector o = prop.GetOrigin()
+        vector a = prop.GetAngles()
+        replay += format( "rfd_ed_import_prop %s %.6f %.6f %.6f %.6f %.6f %.6f %s\n", string( prop.GetModelName() ), o.x, o.y, o.z, a.x, a.y, a.z, tag )
+    }
+    snapshot += "END|" + props.len() + "\n"
+    replay += "rfd_ed_import_end\n"
+    try
+    {
+        DevTextBufferClear()
+        DevTextBufferWrite( snapshot )
+        DevTextBufferDumpToFile( RFD_EditorSavePath() )
+        file.serial++
+        // DumpToFile consumes the native buffer in v2.6.52.
+        DevTextBufferWrite( snapshot )
+        DevTextBufferDumpToFile( "rfd_editor_saves/" + GetMapName() + "_" + GetUnixTimestamp() + "_" + file.serial + ".rfd" )
+        DevTextBufferClear()
+        DevTextBufferWrite( replay )
+        DevTextBufferDumpToFile( "cfg/rfd_editor_saves/" + GetMapName() + ".cfg" )
+        DevTextBufferWrite( replay )
+        DevTextBufferDumpToFile( "cfg/rfd_editor_saves/latest.cfg" )
+        printt( "[RFD_EDITOR] SAVE_WRITTEN", "path", RFD_EditorSavePath(), "count", props.len(), "replay", "cfg/rfd_editor_saves/latest.cfg" )
+    }
+    catch ( error )
+    {
+        printt( "[RFD_EDITOR] SAVE_FAILED", error )
+    }
+    return true
+}
+
+bool function RFD_EditorLoad( entity player, array<string> args )
+{
+    // File reads are unavailable in this build. Native exec reads the generated
+    // data-only replay, whose transaction validates every prop before replacing.
+    ClientCommand( player, "exec rfd_editor_saves/latest.cfg" )
+    return true
+}
+
+bool function RFD_EditorImportBegin( entity player, array<string> args )
+{
+    file.pending.clear()
+    file.expected = -1
+    file.invalidImport = true
+    if ( args.len() != 2 || args[0] != GetMapName() ) return true
+    try
+    {
+        file.expected = args[1].tointeger()
+        file.invalidImport = file.expected < 0 || file.expected > 200
+    }
+    catch ( error ) { file.invalidImport = true }
+    return true
+}
+
+bool function RFD_EditorImportProp( entity player, array<string> args )
+{
+    if ( file.expected < 0 || file.invalidImport ) return true
+    try
+    {
+            if ( args.len() != 8 ) throw "invalid_record"
+            RFDEditorRecord record
+            record.model = CastStringToAsset( args[0] )
+            if ( !RFD_EditorModelAllowed( record.model ) ) throw "unlisted_model"
+            array<float> nums
+            for ( int n = 1; n < 7; n++ )
+            {
+                float value = args[n].tofloat()
+                if ( value != value || fabs( value ) > 1000000.0 ) throw "invalid_number"
+                nums.append( value )
+            }
+            record.origin = <nums[0],nums[1],nums[2]>
+            record.angles = <nums[3],nums[4],nums[5]>
+            record.tag = args[7]
+            if ( !PositionIsInMapBounds( record.origin ) ) throw "outside_world"
+            if ( record.tag != "-" && record.tag.slice( 0, 1 ) != "A" && record.tag.slice( 0, 1 ) != "B" && record.tag.slice( 0, 1 ) != "C" && record.tag.slice( 0, 1 ) != "D" ) throw "invalid_tag"
+            file.pending.append( record )
+            if ( file.pending.len() > file.expected ) throw "too_many_props"
+    }
+    catch ( error )
+    {
+        file.invalidImport = true
+        printt( "[RFD_EDITOR] IMPORT_INVALID", error )
+    }
+    return true
+}
+
+bool function RFD_EditorImportEnd( entity player, array<string> args )
+{
+    if ( file.invalidImport || file.expected < 0 || file.pending.len() != file.expected )
+    {
+        printt( "[RFD_EDITOR] LOAD_REJECT scene_unchanged", "expected", file.expected, "received", file.pending.len() )
+        file.expected = -1
+        file.pending.clear()
+        return true
+    }
+    RFD_EditorClearProps()
+    file.tags.clear()
+    foreach ( RFDEditorRecord record in file.pending )
+    {
+        entity prop = RFD_EditorPlaceProp( record.model, record.origin, record.angles )
+        if ( IsValid( prop ) && record.tag != "-" )
+        {
+            prop.NotSolid()
+            file.tags[prop] <- record.tag
+        }
+    }
+    file.successfulImports++
+    printt( "[RFD_EDITOR] LOAD_OK", "path", RFD_EditorSavePath(), "count", RFD_EditorGetProps().len() )
+    file.expected = -1
+    file.pending.clear()
+    return true
+}
+
+bool function RFD_EditorClear( entity player, array<string> args )
+{
+    RFD_EditorClearProps()
+    file.tags.clear()
+    return true
+}
+
+bool function RFD_EditorMark( entity player, array<string> args )
+{
+    if ( !IsValid( player ) || !IsAlive( player ) || args.len() == 0 ) return true
+    string name = args[0]
+    if ( name != "A" && name != "B" && name != "C" && name != "D" ) return true
+    bool vertex = args.len() > 1 && args[1] == "vertex"
+    bool spawn = args.len() > 1 && args[1] == "spawn"
+    if ( spawn && name == "D" )
+    {
+        printt( "[RFD_EDITOR] MARK_REJECT spawn_requires_team_A_B_or_C" )
+        return true
+    }
+    string tag = name + (spawn ? "_spawn" : "_center")
+    if ( !vertex )
+    {
+        array<entity> old
+        foreach ( entity ent, string existing in file.tags )
+            if ( existing == tag ) old.append( ent )
+        foreach ( entity ent in old )
+        {
+            delete file.tags[ent]
+            if ( IsValid( ent ) ) { RFD_EditorForgetProp( ent ); ent.Destroy() }
+        }
+    }
+    if ( vertex )
+    {
+        // Loaded snapshots retain their old tags; never reuse a vertex ID.
+        bool unique = false
+        while ( !unique )
+        {
+            file.serial++
+            tag = name + "_vertex_" + file.serial
+            unique = true
+            foreach ( entity ent, string existing in file.tags )
+                if ( existing == tag ) unique = false
+        }
+    }
+    entity marker = RFD_EditorPlaceProp( $"mdl/props/death_box/death_box_01.rmdl", player.GetOrigin() + <0,0,2>, <0,player.EyeAngles().y,0> )
+    if ( IsValid( marker ) )
+    {
+        marker.NotSolid()
+        file.tags[marker] <- tag
+        printt( "[RFD_EDITOR] HOTSPOT_MARK", tag, "origin", marker.GetOrigin() )
+        RFD_EditorSave( player, [] )
+    }
+    return true
+}
+
+bool function RFD_EditorCheck( entity player, array<string> args )
+{
+    printt( "[RFD_EDITOR] CHECK", "map", GetMapName(), "props", RFD_EditorGetProps().len(), "marks", file.tags.len(), "alive", IsAlive( player ) )
+    return true
+}
+
+void function RFD_EditorDrawLabels()
+{
+    while ( true )
+    {
+        foreach ( entity ent, string tag in file.tags )
+            if ( IsValid( ent ) ) DebugDrawText( ent.GetOrigin() + <0,0,40>, tag, false, 0.3 )
+        wait 0.2
+    }
+}
+#endif
+
+#if CLIENT
+global function ClientCodeCallback_rfdeditor_ModInit
+global function RFD_EditorClientReplay
+void function ClientCodeCallback_rfdeditor_ModInit()
+{
+    if ( GetConVarInt( "rfd_editor_enabled" ) != 1 ) return
+    MpWeaponEditor_Init()
+    ScriptRemote_RegisterClientFunction( "RFD_EditorClientReplay" )
+    printt( "[RFD_EDITOR] CLIENT_INIT" )
+}
+
+void function RFD_EditorClientReplay()
+{
+    entity player = GetLocalClientPlayer()
+    if ( !IsValid( player ) )
+    {
+        printt( "[RFD_EDITOR_TEST] FAIL client_replay_no_local_player" )
+        return
+    }
+    player.ClientCommand( "exec rfd_editor_saves/latest.cfg" )
+}
+#endif

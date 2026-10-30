@@ -1,0 +1,8 @@
+When: "SERVER || CLIENT"
+Scripts:
+[
+    rfd_editor_mode_place.gnut
+    rfd_editor_mode_delete.gnut
+    sh_rfd_editor_weapon.gnut
+    sh_rfd_editor_main.gnut
+]

@@ -1,0 +1,193 @@
+// R5R-v2.6.52 adapter for the bundled, dormant mp_weapon_editor definition.
+// Placement concepts adapted from mostlyfireproof/scripts_r5 SalEditor.
+// No legacy wheel enums, toys, base-script replacement or gameplay hooks.
+global function MpWeaponEditor_Init
+global function OnWeaponAttemptOffhandSwitch_weapon_editor
+global function OnWeaponActivate_weapon_editor
+global function OnWeaponDeactivate_weapon_editor
+global function OnWeaponOwnerChanged_weapon_editor
+global function OnWeaponPrimaryAttack_weapon_editor
+
+#if CLIENT
+global function RFD_EditorClientMode
+#endif
+
+struct
+{
+    bool initialized = false
+    #if CLIENT
+    bool inputsRegistered = false
+    bool bindingsAppliedAfterSpawn = false
+    int mode = 0
+    array<var> hints
+    #endif
+} file
+
+void function MpWeaponEditor_Init()
+{
+    if ( file.initialized )
+        return
+    file.initialized = true
+    // Keep an explicit, precached small catalog. Native per-map ShAssets_Init
+    // has incomplete map support and would eagerly load unrelated models.
+    RFD_EditorPlaceInit()
+    RFD_EditorDeleteInit()
+    // Native RPC integer maxima are exclusive, so both modes 0 and 1 need 2.
+    ScriptRemote_RegisterClientFunction( "RFD_EditorClientMode", "int", 0, 2 )
+    #if SERVER
+    PrecacheWeapon( $"mp_weapon_editor" )
+    AddClientCommandCallback( "SetEditorMode", RFD_EditorCommandMode )
+    #elseif CLIENT
+    AddCallback_LocalClientPlayerSpawned( RFD_EditorApplyBindingsAfterSpawn )
+    #endif
+    printt( "[RFD_EDITOR] WEAPON_INIT", "map", GetMapName() )
+}
+
+bool function OnWeaponAttemptOffhandSwitch_weapon_editor( entity weapon )
+{
+    return IsValid( weapon.GetWeaponOwner() ) && IsAlive( weapon.GetWeaponOwner() )
+}
+
+void function OnWeaponActivate_weapon_editor( entity weapon )
+{
+    entity player = weapon.GetWeaponOwner()
+    if ( !IsValid( player ) || !IsAlive( player ) )
+        return
+    #if SERVER
+    RFD_EditorSetMode( player, 0 )
+    #elseif CLIENT
+    if ( player != GetLocalClientPlayer() || file.inputsRegistered )
+        return
+    // Some development playlists emit their initial spawn before client
+    // script initialization finishes. Equipping is a reliable second path.
+    thread RFD_EditorApplyBindingsAfterSpawn( player )
+    file.inputsRegistered = true
+    RegisterConCommandTriggeredCallback( "+use", RFD_EditorInputNext )
+    RegisterConCommandTriggeredCallback( "+reload", RFD_EditorInputPrevious )
+    RegisterConCommandTriggeredCallback( "+scriptCommand4", RFD_EditorInputSection )
+    RegisterConCommandTriggeredCallback( "+scriptCommand6", RFD_EditorInputYaw )
+    RegisterConCommandTriggeredCallback( "+scriptCommand1", RFD_EditorInputSnap )
+    RegisterConCommandTriggeredCallback( "+scriptCommand2", RFD_EditorInputPitch )
+    RegisterConCommandTriggeredCallback( "+scriptCommand3", RFD_EditorInputRoll )
+    RegisterConCommandTriggeredCallback( "+scriptCommand5", RFD_EditorInputToggle )
+    RegisterConCommandTriggeredCallback( "weaponSelectPrimary0", RFD_EditorInputUp )
+    RegisterConCommandTriggeredCallback( "weaponSelectPrimary1", RFD_EditorInputDown )
+    RegisterConCommandTriggeredCallback( "weapon_inspect", RFD_EditorInputReset )
+    RFD_EditorClientMode( 0 )
+    #endif
+}
+
+void function OnWeaponDeactivate_weapon_editor( entity weapon )
+{
+    entity player = weapon.GetWeaponOwner()
+    #if SERVER
+    RFD_EditorStopPreview( player )
+    #elseif CLIENT
+    if ( !file.inputsRegistered )
+        return
+    file.inputsRegistered = false
+    DeregisterConCommandTriggeredCallback( "+use", RFD_EditorInputNext )
+    DeregisterConCommandTriggeredCallback( "+reload", RFD_EditorInputPrevious )
+    DeregisterConCommandTriggeredCallback( "+scriptCommand4", RFD_EditorInputSection )
+    DeregisterConCommandTriggeredCallback( "+scriptCommand6", RFD_EditorInputYaw )
+    DeregisterConCommandTriggeredCallback( "+scriptCommand1", RFD_EditorInputSnap )
+    DeregisterConCommandTriggeredCallback( "+scriptCommand2", RFD_EditorInputPitch )
+    DeregisterConCommandTriggeredCallback( "+scriptCommand3", RFD_EditorInputRoll )
+    DeregisterConCommandTriggeredCallback( "+scriptCommand5", RFD_EditorInputToggle )
+    DeregisterConCommandTriggeredCallback( "weaponSelectPrimary0", RFD_EditorInputUp )
+    DeregisterConCommandTriggeredCallback( "weaponSelectPrimary1", RFD_EditorInputDown )
+    DeregisterConCommandTriggeredCallback( "weapon_inspect", RFD_EditorInputReset )
+    RFD_EditorDestroyHints()
+    #endif
+}
+
+void function OnWeaponOwnerChanged_weapon_editor( entity weapon, WeaponOwnerChangedParams changeParams )
+{
+}
+
+var function OnWeaponPrimaryAttack_weapon_editor( entity weapon, WeaponPrimaryAttackParams attackParams )
+{
+    #if SERVER
+    entity player = weapon.GetWeaponOwner()
+    if ( RFD_EditorPlayerHasTool( player ) )
+    {
+        if ( RFD_EditorGetMode( player ) == 1 )
+            RFD_EditorDeleteAtAim( player )
+        else
+            RFD_EditorCommitPreview( player )
+    }
+    #endif
+    return 0
+}
+
+#if CLIENT
+void function RFD_EditorApplyBindingsAfterSpawn( entity player )
+{
+    if ( file.bindingsAppliedAfterSpawn )
+        return
+
+    // Launch +exec precedes the saved key settings. The native local-spawn
+    // callback runs in a thread, so apply the editor binds after that setup.
+    wait 0.5
+    if ( file.bindingsAppliedAfterSpawn || !IsValid( player ) || player != GetLocalClientPlayer() )
+        return
+
+    // Native client movement-recorder code uses entity.ClientCommand for
+    // local console binds as well. Avoid the server-side command filter.
+    array<string> keys = ["3","4","5","6","b","z","F5","F9","F6","F7","F8","F11","f"]
+    array<string> commands = ["+scriptCommand6","+scriptCommand1","+scriptCommand2","+scriptCommand3","+scriptCommand5","+scriptCommand4","rfd_ed_save","exec rfd_editor_saves/latest.cfg","rfd_mark A","rfd_mark B","rfd_mark C","rfd_mark D","noclip"]
+    for ( int i = 0; i < keys.len(); i++ )
+        player.ClientCommand( "bind_US_standard \"" + keys[i] + "\" \"" + commands[i] + "\" 0" )
+    file.bindingsAppliedAfterSpawn = true
+    wait 0.2
+    printt( "[RFD_EDITOR] BINDS_APPLIED_AFTER_SPAWN", "save", GetKeyTappedBinding( KeyNameToKeyCode( "F5" ) ), "markA", GetKeyTappedBinding( KeyNameToKeyCode( "F6" ) ) )
+}
+
+void function RFD_EditorDestroyHints()
+{
+    foreach ( var hint in file.hints )
+        RuiDestroyIfAlive( hint )
+    file.hints.clear()
+}
+
+void function RFD_EditorHint( string key, string text )
+{
+    var hint = CreateFullscreenRui( $"ui/tutorial_hint_line.rpak" )
+    // This native field resolves key glyph tokens, not arbitrary key labels.
+    // Plain ASCII instructions belong in hintText to avoid missing glyphs.
+    RuiSetString( hint, "buttonText", "" )
+    RuiSetString( hint, "hintText", key == "" ? text : key + " | " + text )
+    RuiSetInt( hint, "hintOffset", file.hints.len() )
+    file.hints.append( hint )
+}
+
+void function RFD_EditorClientMode( int mode )
+{
+    file.mode = mode
+    RFD_EditorDestroyHints()
+    if ( !file.inputsRegistered )
+        return
+    RFD_EditorHint( "RFD Editor", mode == 0 ? "PLACE MODE" : "DELETE MODE - only editor props" )
+    RFD_EditorHint( "LMB / B", mode == 0 ? "Place prop / switch mode" : "Delete aimed prop / switch mode" )
+    RFD_EditorHint( "E / R / Z", "Next model / previous model / next section" )
+    RFD_EditorHint( "3 / 4", "Yaw +15 degrees / grid snap" )
+    RFD_EditorHint( "1 / 2", "Raise / lower placement" )
+}
+
+void function RFD_EditorSend( entity player, string command )
+{
+    if ( file.inputsRegistered && IsValid( player ) && player == GetLocalClientPlayer() )
+        player.ClientCommand( command )
+}
+void function RFD_EditorInputNext( entity player ) { RFD_EditorSend( player, "rfd_editor_next" ) }
+void function RFD_EditorInputPrevious( entity player ) { RFD_EditorSend( player, "rfd_editor_previous" ) }
+void function RFD_EditorInputSection( entity player ) { RFD_EditorSend( player, "rfd_editor_section" ) }
+void function RFD_EditorInputYaw( entity player ) { RFD_EditorSend( player, "rfd_editor_rotate yaw" ) }
+void function RFD_EditorInputPitch( entity player ) { RFD_EditorSend( player, "rfd_editor_rotate pitch" ) }
+void function RFD_EditorInputRoll( entity player ) { RFD_EditorSend( player, "rfd_editor_rotate roll" ) }
+void function RFD_EditorInputSnap( entity player ) { RFD_EditorSend( player, "rfd_editor_snap" ) }
+void function RFD_EditorInputToggle( entity player ) { RFD_EditorSend( player, "SetEditorMode" ) }
+void function RFD_EditorInputUp( entity player ) { RFD_EditorSend( player, "rfd_editor_height 1" ) }
+void function RFD_EditorInputDown( entity player ) { RFD_EditorSend( player, "rfd_editor_height -1" ) }
+void function RFD_EditorInputReset( entity player ) { RFD_EditorSend( player, "rfd_editor_reset" ) }
+#endif
